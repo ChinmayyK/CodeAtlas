@@ -62,3 +62,4 @@ export async function scanFiles(dirPath) {
 
   return results;
 }
+
