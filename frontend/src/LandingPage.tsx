@@ -165,3 +165,4 @@ export function LandingPage({ onEnter }: LandingPageProps) {
     </div>
   );
 }
+
