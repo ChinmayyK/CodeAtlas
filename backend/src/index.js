@@ -21,8 +21,11 @@ app.use((req, res, next) => {
   next();
 });
 
+import { explainNode } from './controllers/analyze.controller.js';
+
 // ── Routes ──────────────────────────────────────
 app.use('/api/analyze', analyzeRoutes);
+app.post('/api/explain', explainNode);
 
 // Health check
 app.get('/api/health', (_req, res) => {
