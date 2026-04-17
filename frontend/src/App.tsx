@@ -6,7 +6,7 @@ import { LandingPage } from './LandingPage';
 // Types
 // ─────────────────────────────────────────────
 
-type NodeKind = 'module' | 'function' | 'service' | 'data';
+type NodeKind = 'module' | 'function' | 'service' | 'data' | 'external';
 type ViewMode = 'map' | 'trace' | 'risk';
 
 type AtlasNode = d3.SimulationNodeDatum & {
@@ -21,15 +21,18 @@ type AtlasNode = d3.SimulationNodeDatum & {
   summary?: string;
   calls: string[];
   callers: string[];
-  focusLevel?: number; // 0 = selected, 1 = direct neighbor, 2 = 2-hop, 3 = hidden/other
+  centrality?: number;
+  relevanceScore?: number;
+  importanceLevel?: number; // 0=focus, 1=top5, 2=medium, 3=low, 4=meta
   isCollapsedFile?: boolean;
+  isMeta?: boolean;
 };
 
 type AtlasLink = d3.SimulationLinkDatum<AtlasNode> & {
   source: string | AtlasNode;
   target: string | AtlasNode;
   weight: number;
-  relation: 'imports' | 'calls' | 'writes' | 'reads' | 'contains' | string;
+  relation: 'imports' | 'calls' | 'writes' | 'reads' | 'contains' | 'meta' | string;
 };
 
 interface ApiNode {
@@ -89,6 +92,7 @@ const kindColor: Record<string, string> = {
   service: '#7b4d9b',
   data: '#5f6f2d',
   external: '#95a1a9',
+  meta: '#4c5862', // Synthetic nodes
 };
 
 const relationColor: Record<string, string> = {
@@ -97,6 +101,7 @@ const relationColor: Record<string, string> = {
   contains: '#5f6f2d',
   writes: '#bc3f3f',
   reads: '#7f8f2d',
+  meta: '#4c5862',
 };
 
 const ownerColorScale = d3.scaleOrdinal(d3.schemeCategory10);
@@ -104,6 +109,7 @@ const ownerColorScale = d3.scaleOrdinal(d3.schemeCategory10);
 function GraphCanvas({
   selectedId,
   onSelect,
+  onExpandMeta,
   viewMode,
   nodes,
   links,
@@ -111,6 +117,7 @@ function GraphCanvas({
 }: {
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onExpandMeta: () => void;
   viewMode: ViewMode;
   nodes: AtlasNode[];
   links: AtlasLink[];
@@ -149,14 +156,14 @@ function GraphCanvas({
       .attr('d', 'M 28 0 L 0 0 0 28')
       .attr('fill', 'none')
       .attr('stroke', '#d8dee3')
-      .attr('stroke-width', 0.7);
+      .attr('stroke-width', 0.5)
+      .attr('opacity', 0.2);
 
     svg
       .append('rect')
       .attr('width', '100%')
       .attr('height', '100%')
-      .attr('fill', 'url(#atlas-grid)')
-      .attr('opacity', 0.45);
+      .attr('fill', 'url(#atlas-grid)');
 
     const viewport = svg.append('g').attr('class', 'graph-viewport');
     const linkLayer = viewport.append('g').attr('class', 'links');
@@ -171,7 +178,7 @@ function GraphCanvas({
 
     svg.call(zoom);
 
-    const baseDistance = compact ? 50 : 80;
+    const baseDistance = compact ? 50 : 100;
 
     const simulation = d3
       .forceSimulation<AtlasNode>(graphNodes)
@@ -182,34 +189,40 @@ function GraphCanvas({
           .id((node) => node.id)
           .distance((link) => {
             if (link.relation === 'contains') return 15;
-            return baseDistance + (5 - (link.weight || 1)) * 10;
+            if (link.relation === 'meta') return 60;
+            return baseDistance + (10 - Math.min((link.weight || 1), 10)) * 5;
           })
-          .strength(0.5)
+          .strength(0.6)
       )
-      .force('charge', d3.forceManyBody().strength(-400))
+      .force('charge', d3.forceManyBody().strength(-600))
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force(
         'collision',
         d3.forceCollide<AtlasNode>().radius((node) => {
-          const baseR = node.focusLevel === 0 ? 30 : node.focusLevel === 1 ? 22 : 16;
-          return baseR + (node.risk || 0) / 5;
+          let r = 20;
+          if (node.importanceLevel === 0) r = 40;
+          else if (node.importanceLevel === 1) r = 32;
+          else if (node.importanceLevel === 2) r = 22;
+          else if (node.importanceLevel === 3) r = 16;
+          else if (node.importanceLevel === 4) r = 24;
+          return r + (node.risk || 0) / 4 + 10; // extra padding
         })
       )
-      .force('x', d3.forceX<AtlasNode>(width / 2).strength(0.08))
-      .force('y', d3.forceY<AtlasNode>(height / 2).strength(0.08));
+      .force('x', d3.forceX<AtlasNode>(width / 2).strength(0.05))
+      .force('y', d3.forceY<AtlasNode>(height / 2).strength(0.05));
 
     const link = linkLayer
       .selectAll<SVGLineElement, AtlasLink>('line')
       .data(graphLinks)
       .join('line')
       .attr('stroke', (edge) => relationColor[edge.relation] || '#8a96a6')
-      .attr('stroke-width', (edge) => Math.max(1, (edge.weight || 1) * 0.8))
-      .attr('stroke-linecap', 'round')
+      // Edge weight visualization (Feature 6)
+      .attr('stroke-width', (edge) => Math.max(1, Math.min((edge.weight || 1) * 0.8, 6)))
+      .attr('stroke-dasharray', (edge) => edge.relation === 'meta' ? '5 5' : '0')
       .attr('opacity', (edge) => {
         const source = edge.source as AtlasNode;
         const target = edge.target as AtlasNode;
-        // Fade edges that connect to 2-hop or hidden nodes
-        if (source.focusLevel === 2 || target.focusLevel === 2) return 0.2;
+        if (source.importanceLevel === 3 || target.importanceLevel === 3) return 0.2;
         return 0.7;
       });
 
@@ -240,11 +253,9 @@ function GraphCanvas({
           })
       )
       .on('click', (_, clickedNode) => {
-        onSelect(clickedNode.id);
-      })
-      .on('keydown', (event, clickedNode) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
+        if (clickedNode.isMeta) {
+          onExpandMeta();
+        } else {
           onSelect(clickedNode.id);
         }
       });
@@ -253,52 +264,54 @@ function GraphCanvas({
     node
       .append('circle')
       .attr('r', (datum) => {
-        let baseR = 16;
-        if (selectedId) {
-          if (datum.focusLevel === 0) baseR = 28;
-          else if (datum.focusLevel === 1) baseR = 20;
-          else baseR = 12;
-        }
-        return baseR;
+        if (datum.importanceLevel === 0) return 32;
+        if (datum.importanceLevel === 1) return 24;
+        if (datum.importanceLevel === 2) return 16;
+        if (datum.importanceLevel === 3) return 10;
+        if (datum.importanceLevel === 4) return 18; // Meta node
+        return 16;
       })
       .attr('fill', (datum) => {
+        if (datum.isMeta) return kindColor.meta;
         if (groupByOwner) return ownerColorScale(datum.owner);
         return kindColor[datum.kind] || kindColor.external;
       })
-      .attr('stroke', (datum) => (datum.focusLevel === 0 ? '#ffffff' : '#f6f8f8'))
-      .attr('stroke-width', (datum) => (datum.focusLevel === 0 ? 4 : 2))
+      .attr('stroke', (datum) => {
+        if (datum.importanceLevel === 0) return '#ffffff';
+        if (datum.importanceLevel === 1) return '#e2e8f0';
+        return '#475569';
+      })
+      .attr('stroke-width', (datum) => (datum.importanceLevel === 0 ? 4 : 2))
       .attr('opacity', (datum) => {
         if (!selectedId) return 1;
-        if (datum.focusLevel === 0 || datum.focusLevel === 1) return 1;
-        if (datum.focusLevel === 2) return 0.4;
-        return 0.1;
+        if (datum.importanceLevel === 3) return 0.4;
+        return 1;
       });
 
     // Risk ring
     node
       .append('circle')
       .attr('r', (datum) => {
+        if (datum.isMeta) return 22;
         let baseR = 22;
-        if (selectedId) {
-          if (datum.focusLevel === 0) baseR = 36;
-          else if (datum.focusLevel === 1) baseR = 26;
-          else baseR = 16;
-        }
+        if (datum.importanceLevel === 0) baseR = 40;
+        else if (datum.importanceLevel === 1) baseR = 30;
+        else if (datum.importanceLevel === 3) baseR = 14;
         return baseR + (datum.risk || 0) / 5;
       })
       .attr('fill', 'none')
       .attr('stroke', (datum) => {
+        if (datum.isMeta) return '#94a3b8';
         if (datum.risk > 70) return '#bc3f3f'; // Red
         if (datum.risk >= 30) return '#9b822c'; // Yellow
         return '#007c70'; // Green
       })
-      .attr('stroke-width', 2)
-      .attr('stroke-dasharray', (datum) => (datum.churn > 10 ? '4 5' : '0'))
+      .attr('stroke-width', (datum) => datum.importanceLevel === 0 ? 3 : 2)
+      .attr('stroke-dasharray', (datum) => (datum.churn > 10 || datum.isMeta ? '4 5' : '0'))
       .attr('opacity', (datum) => {
         if (!selectedId) return 0.8;
-        if (datum.focusLevel === 0 || datum.focusLevel === 1) return 0.9;
-        if (datum.focusLevel === 2) return 0.3;
-        return 0;
+        if (datum.importanceLevel === 3) return 0.2;
+        return 0.9;
       });
 
     // Label
@@ -307,26 +320,25 @@ function GraphCanvas({
       .text((datum) => datum.label + (datum.isCollapsedFile ? ' (+)' : ''))
       .attr('x', 0)
       .attr('y', (datum) => {
+        if (datum.isMeta) return 40;
         let baseR = 16;
-        if (selectedId) {
-          if (datum.focusLevel === 0) baseR = 28;
-          else if (datum.focusLevel === 1) baseR = 20;
-          else baseR = 12;
-        }
-        return baseR + 20 + (datum.risk || 0) / 5;
+        if (datum.importanceLevel === 0) baseR = 32;
+        else if (datum.importanceLevel === 1) baseR = 24;
+        else if (datum.importanceLevel === 3) baseR = 10;
+        return baseR + 18 + (datum.risk || 0) / 5;
       })
       .attr('text-anchor', 'middle')
-      .attr('fill', '#182026')
-      .attr('font-size', (datum) => (datum.focusLevel === 0 ? 14 : 11))
-      .attr('font-weight', 700)
+      .attr('fill', '#f1f5f9')
+      .attr('font-size', (datum) => (datum.importanceLevel === 0 ? 15 : datum.importanceLevel === 1 ? 13 : 11))
+      .attr('font-weight', (datum) => datum.importanceLevel <= 1 ? 700 : 500)
       .attr('paint-order', 'stroke')
-      .attr('stroke', '#f6f8f8')
+      .attr('stroke', '#0f172a')
       .attr('stroke-width', 4)
       .attr('stroke-linejoin', 'round')
       .attr('opacity', (datum) => {
         if (!selectedId) return 1;
-        if (datum.focusLevel === 0 || datum.focusLevel === 1) return 1;
-        return 0; // hide labels for deep neighbors
+        if (datum.importanceLevel === 3) return 0; // Hide labels for deep neighbors
+        return 1;
       });
 
     node.append('title').text((datum) => `${datum.path}\nRisk ${datum.risk}/100\nOwner: ${datum.owner}`);
@@ -344,7 +356,7 @@ function GraphCanvas({
     return () => {
       simulation.stop();
     };
-  }, [selectedId, onSelect, viewMode, nodes, links, groupByOwner]);
+  }, [selectedId, onSelect, onExpandMeta, viewMode, nodes, links, groupByOwner]);
 
   return <svg ref={svgRef} className="dependency-graph" aria-label="Interactive dependency graph" style={{ width: '100%', height: '100%' }} />;
 }
@@ -358,6 +370,120 @@ function RiskBar({ value }: { value: number }) {
   return (
     <div className={`risk-bar ${colorClass}`} aria-label={`Risk score ${safeValue}`}>
       <span style={{ width: `${safeValue}%`, background: colorClass === 'red' ? '#bc3f3f' : colorClass === 'yellow' ? '#9b822c' : '#007c70' }} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Spotlight Search Component
+// ─────────────────────────────────────────────
+
+function SpotlightSearch({
+  isOpen,
+  onClose,
+  nodes,
+  onSelect
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  nodes: AtlasNode[];
+  onSelect: (id: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setQuery('');
+      setFocusedIndex(0);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [isOpen]);
+
+  const results = useMemo(() => {
+    if (!query.trim()) return [];
+    const q = query.toLowerCase();
+    return nodes.filter(n => n.label.toLowerCase().includes(q) || n.path.toLowerCase().includes(q)).slice(0, 15);
+  }, [query, nodes]);
+
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [results]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isOpen) return;
+      if (e.key === 'Escape') {
+        onClose();
+        e.preventDefault();
+      } else if (e.key === 'ArrowDown') {
+        setFocusedIndex(prev => Math.min(prev + 1, Math.max(0, results.length - 1)));
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp') {
+        setFocusedIndex(prev => Math.max(prev - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'Enter') {
+        if (results[focusedIndex]) {
+          onSelect(results[focusedIndex].id);
+          onClose();
+        }
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, results, focusedIndex, onClose, onSelect]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="spotlight-overlay" onClick={onClose}>
+      <div className="spotlight-modal" onClick={e => e.stopPropagation()}>
+        <div className="spotlight-input-wrapper">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input
+            ref={inputRef}
+            className="spotlight-input"
+            placeholder="Search files, functions, or modules..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+          />
+          <div className="spotlight-shortcut-hint">ESC</div>
+        </div>
+        
+        {query.trim() && (
+          <div className="spotlight-results">
+            {results.length > 0 ? (
+              results.map((n, idx) => (
+                <div
+                  key={n.id}
+                  className="spotlight-result-item"
+                  aria-selected={idx === focusedIndex}
+                  onClick={() => {
+                    onSelect(n.id);
+                    onClose();
+                  }}
+                  onMouseEnter={() => setFocusedIndex(idx)}
+                >
+                  <div className="spotlight-result-icon" style={{background: kindColor[n.kind] || kindColor.external}}>
+                    {n.kind === 'module' ? 'M' : n.kind === 'function' ? 'f()' : 'E'}
+                  </div>
+                  <div className="spotlight-result-content">
+                    <div className="spotlight-result-title">{n.label}</div>
+                    <div className="spotlight-result-path">{n.path}</div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="spotlight-results-empty">No results found for "{query}"</div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -381,12 +507,38 @@ function App() {
 
   // ── Intelligent Filters & Clustering State ──
   const [searchQuery, setSearchQuery] = useState('');
-  const [focusDepth, setFocusDepth] = useState<1 | 2>(1);
   const [showHighRiskOnly, setShowHighRiskOnly] = useState(false);
   const [groupByOwner, setGroupByOwner] = useState(false);
   const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
   const [showCalls, setShowCalls] = useState(true);
   const [showImports, setShowImports] = useState(true);
+  
+  // Feature: Expand Limit State
+  const [expandedFocusNodes, setExpandedFocusNodes] = useState<Set<string>>(new Set());
+
+  // Spotlight State
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  useEffect(() => {
+    const handleCmdK = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        setIsSearchOpen(prev => !prev);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('keydown', handleCmdK);
+    return () => window.removeEventListener('keydown', handleCmdK);
+  }, []);
+
+  const searchableNodes = useMemo(() => {
+    if (!appData) return [];
+    return appData.nodes.map(n => ({
+      id: n.id,
+      label: n.label,
+      path: n.file,
+      kind: n.type === 'file' ? 'module' : n.type === 'function' ? 'function' : 'external',
+    } as AtlasNode));
+  }, [appData]);
 
   // Load from local storage
   useEffect(() => {
@@ -394,8 +546,6 @@ function App() {
     if (saved) {
       setRepoUrl(saved);
       setInputUrl(saved);
-      handleAnalyze(saved);
-      setShowApp(true);
     }
   }, []);
 
@@ -411,6 +561,7 @@ function App() {
     setSelectedId(null);
     setSearchQuery('');
     setExpandedModules(new Set());
+    setExpandedFocusNodes(new Set());
 
     try {
       const res = await fetch(`${API_BASE}/api/analyze/github`, {
@@ -444,7 +595,7 @@ function App() {
   const { graphNodes, graphLinks, riskRows } = useMemo(() => {
     if (!appData) return { graphNodes: [], graphLinks: [], riskRows: [] };
 
-    // 1. Map raw nodes
+    // 1. Map raw nodes & calculate Centrality
     let allNodes = appData.nodes.map((n) => {
       const churn = appData.hotspots?.[n.file] || 0;
       return {
@@ -458,7 +609,9 @@ function App() {
         loc: 0,
         calls: [],
         callers: [],
-        focusLevel: 3, // default hidden/other
+        centrality: 0,
+        focusLevel: 3, 
+        importanceLevel: 3,
         isCollapsedFile: false,
       } as AtlasNode;
     });
@@ -473,11 +626,17 @@ function App() {
       relation: e.type,
     })) as AtlasLink[];
 
-    // Compute calls/callers for side panel
+    // Compute calls/callers & Centrality
     allLinks.forEach(e => {
       if (typeof e.source === 'string' && typeof e.target === 'string') {
-        nodeMap.get(e.source)?.calls.push(e.target);
-        nodeMap.get(e.target)?.callers.push(e.source);
+        const sourceNode = nodeMap.get(e.source);
+        const targetNode = nodeMap.get(e.target);
+        if (sourceNode && targetNode) {
+          sourceNode.calls.push(e.target);
+          targetNode.callers.push(e.source);
+          sourceNode.centrality = (sourceNode.centrality || 0) + 1;
+          targetNode.centrality = (targetNode.centrality || 0) + 1;
+        }
       }
     });
 
@@ -489,7 +648,6 @@ function App() {
     }
 
     // 4. Clustering (Collapse files)
-    // If a file is NOT expanded, its inner functions are hidden, and edges remapped to the file.
     const fileNodes = allNodes.filter(n => n.kind === 'module');
     fileNodes.forEach(f => {
       if (!expandedModules.has(f.id)) {
@@ -497,22 +655,26 @@ function App() {
         const childFuncs = allNodes.filter(n => n.kind === 'function' && n.path === f.path && n.id !== f.id);
         const childIds = new Set(childFuncs.map(c => c.id));
         
-        // Remap links
         allLinks = allLinks.map(l => {
           let s = typeof l.source === 'string' ? l.source : l.source.id;
           let t = typeof l.target === 'string' ? l.target : l.target.id;
-          
           if (childIds.has(s) && !childIds.has(t)) s = f.id;
           if (childIds.has(t) && !childIds.has(s)) t = f.id;
-          
           return { ...l, source: s, target: t };
         });
 
-        // Filter out child nodes
         allNodes = allNodes.filter(n => !childIds.has(n.id));
       } else {
         f.isCollapsedFile = false;
       }
+    });
+
+    // Cleanup dangling links (internal function calls inside collapsed files)
+    const validNodeIds = new Set(allNodes.map(n => n.id));
+    allLinks = allLinks.filter(l => {
+      const s = typeof l.source === 'string' ? l.source : l.source.id;
+      const t = typeof l.target === 'string' ? l.target : l.target.id;
+      return validNodeIds.has(s) && validNodeIds.has(t);
     });
 
     // 5. Apply Global Filters
@@ -529,54 +691,127 @@ function App() {
     if (!showCalls) allLinks = allLinks.filter(l => l.relation !== 'calls');
     if (!showImports) allLinks = allLinks.filter(l => l.relation !== 'import' && l.relation !== 'imports');
 
-    // 6. Focus Mode Logic
+    // 6. Focus Mode Logic with Ranking
     let visibleNodes = allNodes;
     let visibleLinks = allLinks;
 
     if (activeSelectedId) {
-      // Find neighbors
-      const hop1 = new Set<string>();
+      const activeNode = allNodes.find(n => n.id === activeSelectedId);
+      if (!activeNode) return { graphNodes: [], graphLinks: [], riskRows: [] };
+
+      // Find 1-hop neighbors and accumulate weights
+      const neighborWeights = new Map<string, number>();
       allLinks.forEach(l => {
         const s = typeof l.source === 'string' ? l.source : l.source.id;
         const t = typeof l.target === 'string' ? l.target : l.target.id;
-        if (s === activeSelectedId) hop1.add(t);
-        if (t === activeSelectedId) hop1.add(s);
+        if (s === activeSelectedId) neighborWeights.set(t, (neighborWeights.get(t) || 0) + (l.weight || 1));
+        if (t === activeSelectedId) neighborWeights.set(s, (neighborWeights.get(s) || 0) + (l.weight || 1));
       });
 
-      const hop2 = new Set<string>();
-      if (focusDepth === 2) {
-        allLinks.forEach(l => {
+      const neighborIds = Array.from(neighborWeights.keys());
+      let neighbors = allNodes.filter(n => neighborIds.includes(n.id));
+
+      if (neighbors.length > 0) {
+        // Normalization
+        const maxWeight = Math.max(...Array.from(neighborWeights.values()), 1);
+        const maxRisk = Math.max(...neighbors.map(n => n.risk || 0), 1);
+        const maxCent = Math.max(...neighbors.map(n => n.centrality || 0), 1);
+
+        neighbors.forEach(n => {
+          const wNorm = (neighborWeights.get(n.id) || 0) / maxWeight * 100;
+          const rNorm = (n.risk || 0) / maxRisk * 100;
+          const cNorm = (n.centrality || 0) / maxCent * 100;
+          n.relevanceScore = (wNorm * 0.4) + (rNorm * 0.3) + (cNorm * 0.3);
+        });
+
+        // Prioritization Rules
+        const top5Risk = [...neighbors].sort((a, b) => (b.risk || 0) - (a.risk || 0)).slice(0, 5);
+        const top5Cent = [...neighbors].sort((a, b) => (b.centrality || 0) - (a.centrality || 0)).slice(0, 5);
+        const mustIncludeIds = new Set([...top5Risk.map(n => n.id), ...top5Cent.map(n => n.id)]);
+
+        // Sort by relevance
+        neighbors.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0));
+
+        let finalNeighbors: AtlasNode[] = [];
+        let hiddenCount = 0;
+
+        // Limiting Logic
+        if (expandedFocusNodes.has(activeSelectedId)) {
+          finalNeighbors = neighbors;
+        } else {
+          const limit = activeNode.kind === 'external' ? 15 : 25;
+          const topN = neighbors.slice(0, limit);
+          const topNSet = new Set(topN.map(n => n.id));
+          
+          finalNeighbors = [...topN];
+          neighbors.forEach(n => {
+            if (!topNSet.has(n.id) && mustIncludeIds.has(n.id)) {
+              finalNeighbors.push(n);
+            }
+          });
+
+          // Absolute maximum threshold to prevent canvas explosion
+          if (finalNeighbors.length > 40) finalNeighbors = finalNeighbors.slice(0, 40);
+          
+          hiddenCount = neighbors.length - finalNeighbors.length;
+        }
+
+        // Visual Importance Assignment
+        finalNeighbors.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0));
+        finalNeighbors.forEach((n, idx) => {
+          if (idx < 5) n.importanceLevel = 1;      // Top 5 -> Big & Bright
+          else if (idx < 15) n.importanceLevel = 2; // Medium -> Normal
+          else n.importanceLevel = 3;               // Rest -> Faded
+        });
+        
+        activeNode.importanceLevel = 0;
+        visibleNodes = [activeNode, ...finalNeighbors];
+
+        // Group Remaining Nodes (Synthetic Node)
+        if (hiddenCount > 0) {
+          const metaNode: AtlasNode = {
+            id: 'meta-more-nodes',
+            label: `+${hiddenCount} more`,
+            path: 'Click to expand all hidden dependencies',
+            kind: 'data',
+            owner: 'System',
+            risk: 0,
+            churn: 0,
+            loc: 0,
+            calls: [],
+            callers: [],
+            importanceLevel: 4,
+            isMeta: true
+          };
+          visibleNodes.push(metaNode);
+          visibleLinks.push({
+            source: activeSelectedId,
+            target: 'meta-more-nodes',
+            weight: 3,
+            relation: 'meta'
+          } as AtlasLink);
+        }
+
+        const visibleIds = new Set(visibleNodes.map(n => n.id));
+        visibleLinks = allLinks.filter(l => {
           const s = typeof l.source === 'string' ? l.source : l.source.id;
           const t = typeof l.target === 'string' ? l.target : l.target.id;
-          if (hop1.has(s)) hop2.add(t);
-          if (hop1.has(t)) hop2.add(s);
+          return visibleIds.has(s) && visibleIds.has(t);
         });
+
+      } else {
+        // No neighbors
+        activeNode.importanceLevel = 0;
+        visibleNodes = [activeNode];
+        visibleLinks = [];
       }
-
-      // Assign focus levels
-      visibleNodes.forEach(n => {
-        if (n.id === activeSelectedId) n.focusLevel = 0;
-        else if (hop1.has(n.id)) n.focusLevel = 1;
-        else if (hop2.has(n.id)) n.focusLevel = 2;
-        else n.focusLevel = 3;
-      });
-
-      visibleNodes = visibleNodes.filter(n => n.focusLevel !== undefined && n.focusLevel < 3);
-      const visibleIds = new Set(visibleNodes.map(n => n.id));
-
-      visibleLinks = allLinks.filter(l => {
-        const s = typeof l.source === 'string' ? l.source : l.source.id;
-        const t = typeof l.target === 'string' ? l.target : l.target.id;
-        return visibleIds.has(s) && visibleIds.has(t);
-      });
-
     } else {
-      // INITIAL VIEW FIX: Only top 20 high risk nodes
+      // INITIAL VIEW: Top 20 highest-risk nodes
       const top20 = [...visibleNodes].sort((a, b) => b.risk - a.risk).slice(0, 20);
       const topIds = new Set(top20.map(n => n.id));
       
       visibleNodes = top20;
-      visibleNodes.forEach(n => n.focusLevel = 1);
+      visibleNodes.forEach(n => n.importanceLevel = 1);
 
       visibleLinks = allLinks.filter(l => {
         const s = typeof l.source === 'string' ? l.source : l.source.id;
@@ -585,7 +820,6 @@ function App() {
       });
     }
 
-    // Prepare hotspot rows for side panel (use all module nodes before filtering)
     const hotspots = appData.nodes
       .filter((n) => n.type === 'file')
       .map(n => ({...n, kind: 'module', churn: appData.hotspots?.[n.file] || 0} as unknown as AtlasNode))
@@ -593,10 +827,9 @@ function App() {
       .slice(0, 10);
 
     return { graphNodes: visibleNodes, graphLinks: visibleLinks, riskRows: hotspots };
-  }, [appData, selectedId, searchQuery, focusDepth, showHighRiskOnly, expandedModules, showCalls, showImports]);
+  }, [appData, selectedId, searchQuery, showHighRiskOnly, expandedModules, showCalls, showImports, expandedFocusNodes]);
 
   const handleNodeClick = (id: string) => {
-    // If it's a file, expand it and set as focus
     const nodeData = appData?.nodes.find(n => n.id === id);
     if (nodeData && nodeData.type === 'file') {
       setExpandedModules(prev => {
@@ -606,22 +839,28 @@ function App() {
       });
     }
     setSelectedId(id);
-    setSearchQuery(''); // Clear search to lock focus
+    setSearchQuery('');
+  };
+
+  const handleExpandMeta = () => {
+    if (selectedId) {
+      setExpandedFocusNodes(prev => {
+        const next = new Set(prev);
+        next.add(selectedId);
+        return next;
+      });
+    }
   };
 
   // AI Explainer Hook
   useEffect(() => {
     if (!selectedId || !appData) return;
     const node = appData.nodes.find((n) => n.id === selectedId);
-    
     if (!node || node.type !== 'function') {
       setExplanation('Select a function node to view AI explanation.');
       return;
     }
-
-    // Find direct dependencies for context
     const deps = appData.edges.filter(e => e.source === selectedId).map(e => e.target);
-
     setExplainerLoading(true);
     setExplanation('');
 
@@ -646,7 +885,6 @@ function App() {
       });
   }, [selectedId, repoUrl, appData]);
 
-  // Selected node detailed view using full appData to ensure we don't miss hidden nodes
   const fullSelectedNode = useMemo(() => {
     if (!appData || !selectedId) return null;
     const n = appData.nodes.find(x => x.id === selectedId);
@@ -655,6 +893,7 @@ function App() {
     const churn = appData.hotspots?.[n.file] || 0;
     const calls = appData.edges.filter((e) => e.source === n.id).map((e) => e.target);
     const callers = appData.edges.filter((e) => e.target === n.id).map((e) => e.source);
+    let centrality = calls.length + callers.length;
 
     return {
       id: n.id,
@@ -666,7 +905,8 @@ function App() {
       churn,
       loc: 0,
       calls,
-      callers
+      callers,
+      centrality
     } as AtlasNode;
   }, [appData, selectedId]);
 
@@ -697,12 +937,12 @@ function App() {
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
               style={{
-                padding: '6px 12px',
-                borderRadius: '4px',
-                border: '1px solid #2d3748',
-                background: '#1a202c',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                border: '1px solid rgba(255,255,255,0.15)',
+                background: 'rgba(0,0,0,0.3)',
                 color: 'white',
-                width: '280px'
+                width: '320px'
               }}
               disabled={loading}
             />
@@ -716,20 +956,19 @@ function App() {
       {/* Intelligent Toolbar */}
       {appData && (
         <div className="intelligent-toolbar">
-          <input 
-            type="text" 
-            placeholder="Search nodes & auto-focus..." 
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="toolbar-search"
-          />
+          <button 
+            className="toolbar-search" 
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'text', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.5)' }}
+            onClick={() => setIsSearchOpen(true)}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              Search nodes...
+            </span>
+            <kbd className="spotlight-shortcut-hint" style={{ margin: 0 }}>⌘K</kbd>
+          </button>
           <div className="toolbar-divider"></div>
           
-          <label className="toolbar-toggle">
-            <input type="checkbox" checked={focusDepth === 2} onChange={(e) => setFocusDepth(e.target.checked ? 2 : 1)} />
-            Depth 2
-          </label>
-
           <label className={`toolbar-toggle ${showHighRiskOnly ? 'risk-active' : ''}`}>
             <input type="checkbox" checked={showHighRiskOnly} onChange={(e) => setShowHighRiskOnly(e.target.checked)} />
             Risk &gt; 60 Only
@@ -753,7 +992,10 @@ function App() {
           </label>
 
           {selectedId && (
-            <button className="ghost-button clear-focus" onClick={() => setSelectedId(null)}>
+            <button className="ghost-button clear-focus" onClick={() => {
+              setSelectedId(null);
+              setSearchQuery('');
+            }}>
               Clear Focus
             </button>
           )}
@@ -768,17 +1010,17 @@ function App() {
 
       {loading && !appData && (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
-          <div className="spinner" style={{ width: '40px', height: '40px', border: '4px solid rgba(255,255,255,0.1)', borderLeftColor: '#007c70', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+          <div className="spinner" style={{ width: '40px', height: '40px', border: '4px solid rgba(255,255,255,0.1)', borderLeftColor: '#2dd4bf', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
           <style>{`@keyframes spin { 100% { transform: rotate(360deg); } }`}</style>
           <h2 style={{ marginTop: '20px' }}>Analyzing Repository...</h2>
-          <p style={{ color: '#8a96a6' }}>Cloning, parsing AST, and gathering GitHub intelligence.</p>
+          <p style={{ color: '#8b949e', marginTop: '8px' }}>Cloning, parsing AST, and gathering GitHub intelligence.</p>
         </div>
       )}
 
       {!loading && !appData && !error && (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
           <h2>No Repository Loaded</h2>
-          <p style={{ color: '#8a96a6', maxWidth: '400px', textAlign: 'center', marginTop: '10px' }}>
+          <p style={{ color: '#8b949e', maxWidth: '400px', textAlign: 'center', marginTop: '10px' }}>
             Enter a GitHub repository URL in the top right to generate an intelligent focus-based dependency graph.
           </p>
         </div>
@@ -791,7 +1033,7 @@ function App() {
               <div className="stage-toolbar" style={{ borderBottom: 'none' }}>
                 <div>
                   <div className="section-kicker">Intelligent Focus Graph</div>
-                  <h2>{selectedId ? 'Local neighborhood view' : 'Top 20 high-risk nodes (Click to focus)'}</h2>
+                  <h2>{selectedId ? 'Top dependencies ranked by risk & centrality' : 'Top 20 high-risk nodes (Click to focus)'}</h2>
                 </div>
               </div>
 
@@ -799,6 +1041,7 @@ function App() {
                 <GraphCanvas
                   selectedId={selectedId}
                   onSelect={handleNodeClick}
+                  onExpandMeta={handleExpandMeta}
                   viewMode={viewMode}
                   nodes={graphNodes}
                   links={graphLinks}
@@ -807,7 +1050,8 @@ function App() {
                 <div className="graph-legend" aria-label="Graph legend">
                   <span><i className="legend-module" style={{background: kindColor.module}} />Module/File</span>
                   <span><i className="legend-function" style={{background: kindColor.function}} />Function</span>
-                  <span style={{marginLeft: '12px', color: '#8a96a6'}}>Click file to expand/focus</span>
+                  <span><i className="legend-meta" style={{background: kindColor.meta}} />Hidden Block</span>
+                  <span style={{marginLeft: '12px', color: '#8a96a6'}}>Thicker edges = strong dependency</span>
                 </div>
               </div>
             </section>
@@ -821,7 +1065,7 @@ function App() {
 
                   <div className="owner-row" style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ fontWeight: 'bold' }}>{fullSelectedNode.owner}</span>
-                    <span style={{ color: '#8a96a6', textTransform: 'capitalize' }}>{fullSelectedNode.kind}</span>
+                    <span style={{ color: '#8b949e', textTransform: 'capitalize' }}>{fullSelectedNode.kind}</span>
                   </div>
 
                   <div className="risk-card" style={{ marginTop: '16px' }}>
@@ -830,14 +1074,14 @@ function App() {
                       <strong>{fullSelectedNode.risk}</strong>
                     </div>
                     <RiskBar value={fullSelectedNode.risk} />
-                    <p style={{ marginTop: '8px' }}>Hotspot Churn Factor: {fullSelectedNode.churn}</p>
+                    <p style={{ marginTop: '8px' }}>Centrality: {fullSelectedNode.centrality} edges</p>
                   </div>
 
                   {fullSelectedNode.kind === 'function' && (
                     <section className="explainer-box" aria-label="AI code explainer" style={{ marginTop: '24px' }}>
                       <div className="section-kicker">AI Explainer</div>
                       {explainerLoading ? (
-                        <p style={{ fontStyle: 'italic', color: '#8a96a6' }}>Analyzing function with AI...</p>
+                        <p style={{ fontStyle: 'italic', color: '#8b949e' }}>Analyzing function with AI...</p>
                       ) : (
                         <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.9rem', lineHeight: '1.5' }}>
                           {explanation}
@@ -850,7 +1094,7 @@ function App() {
                     <div>
                       <h3>Incoming ({fullSelectedNode.callers.length})</h3>
                       {fullSelectedNode.callers.length ? (
-                        fullSelectedNode.callers.map((id) => {
+                        fullSelectedNode.callers.slice(0, 15).map((id) => {
                           const n = appData.nodes.find(x => x.id === id);
                           if (!n) return null;
                           return (
@@ -860,13 +1104,13 @@ function App() {
                           );
                         })
                       ) : (
-                        <p style={{ color: '#8a96a6' }}>None detected</p>
+                        <p style={{ color: '#8b949e' }}>None detected</p>
                       )}
                     </div>
                     <div>
                       <h3>Outgoing ({fullSelectedNode.calls.length})</h3>
                       {fullSelectedNode.calls.length ? (
-                        fullSelectedNode.calls.map((id) => {
+                        fullSelectedNode.calls.slice(0, 15).map((id) => {
                           const n = appData.nodes.find(x => x.id === id);
                           if (!n) return null;
                           return (
@@ -876,7 +1120,7 @@ function App() {
                           );
                         })
                       ) : (
-                        <p style={{ color: '#8a96a6' }}>None detected</p>
+                        <p style={{ color: '#8b949e' }}>None detected</p>
                       )}
                     </div>
                   </section>
@@ -912,7 +1156,7 @@ function App() {
                     </div>
                   </div>
                   
-                  <div style={{ display: 'flex', marginTop: '40px', alignItems: 'center', justifyContent: 'center', color: '#8a96a6' }}>
+                  <div style={{ display: 'flex', marginTop: '40px', alignItems: 'center', justifyContent: 'center', color: '#8b949e' }}>
                     Select a node to focus graph
                   </div>
                 </div>
@@ -935,7 +1179,7 @@ function App() {
                   <div>
                     <h3 style={{ wordBreak: 'break-all' }}>{node.label}</h3>
                     <p style={{ wordBreak: 'break-all' }}>{node.path}</p>
-                    <p style={{ fontSize: '0.8rem', color: '#8a96a6', marginTop: '4px' }}>Owner: {node.owner}</p>
+                    <p style={{ fontSize: '0.8rem', color: '#8b949e', marginTop: '4px' }}>Owner: {node.owner}</p>
                   </div>
                   <RiskBar value={node.risk} />
                   <button onClick={() => {
@@ -948,6 +1192,13 @@ function App() {
           </section>
         </>
       )}
+
+      <SpotlightSearch
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        nodes={searchableNodes}
+        onSelect={handleNodeClick}
+      />
     </main>
   );
 }
